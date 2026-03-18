@@ -22,6 +22,65 @@ except ImportError:
 # Disabilita gli avvisi di sicurezza per le richieste senza verifica SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+# DNS-over-HTTPS (DoH) Önbelleği ve yardımcıları (Domain çözümleme engellerini aşmak için)
+DNS_CACHE = {}
+
+def dns_resolve(domain):
+    """Cloudflare ve Google DoH üzerinden IP adresini çözer (IP bazlı yedeklerle)."""
+    if domain in DNS_CACHE: return DNS_CACHE[domain]
+    # DoH servislerinin doğrudan IP'leri üzerinden gitmek daha garanti (kendi DNS'i bile bozuksa)
+    doh_urls = [
+        f"https://1.1.1.1/dns-query?name={domain}&type=A",
+        f"https://8.8.8.8/resolve?name={domain}&type=A",
+        f"https://cloudflare-dns.com/dns-query?name={domain}&type=A"
+    ]
+    for url in doh_urls:
+        try:
+            r = requests.get(url, headers={"accept": "application/dns-json"}, timeout=5, verify=False)
+            if r.status_code == 200:
+                data = r.json()
+                # Cloudflare formatı (Answer)
+                if "Answer" in data:
+                    for answer in data["Answer"]:
+                        if answer["type"] == 1:
+                            ip = answer["data"]
+                            DNS_CACHE[domain] = ip
+                            return ip
+                # Google formatı (answer)
+                elif "answer" in data:
+                    for answer in data["answer"]:
+                        if answer["type"] == 1:
+                            ip = answer["data"]
+                            DNS_CACHE[domain] = ip
+                            return ip
+        except: continue
+    return None
+
+def _dns_wrap(url, kwargs):
+    """URL'yi IP bazlı hale getirir ve Host header'ını ekler."""
+    parsed = urllib.parse.urlparse(url)
+    domain = parsed.netloc
+    ip = dns_resolve(domain)
+    headers = kwargs.get("headers", {})
+    if ip:
+        url = url.replace(domain, ip)
+        if "https://" in url:
+            url = url.replace("https://", "http://")
+        headers["Host"] = domain
+        kwargs["headers"] = headers
+        kwargs["verify"] = False
+    return url, kwargs
+
+def dns_post(url, **kwargs):
+    """DNS bypass desteği ile POST isteği atar."""
+    url, kwargs = _dns_wrap(url, kwargs)
+    return requests.post(url, **kwargs)
+
+def dns_get(url, **kwargs):
+    """DNS bypass desteği ile GET isteği atar."""
+    url, kwargs = _dns_wrap(url, kwargs)
+    return requests.get(url, **kwargs)
+
 def headers_to_extvlcopt(headers):
     """Funzione mantenuta per compatibilità, ma non più utilizzata attivamente."""
     return []
@@ -412,41 +471,6 @@ def vavoo_channels():
     """
     print("Eseguendo vavoo_channels (Robust Version)...")
     
-    DNS_CACHE = {}
-
-    def dns_resolve(domain):
-        if domain in DNS_CACHE:
-            return DNS_CACHE[domain]
-        try:
-            # Cloudflare DoH kullanarak IP adresini çöz
-            url = f"https://cloudflare-dns.com/dns-query?name={domain}&type=A"
-            r = requests.get(url, headers={"accept": "application/dns-json"}, timeout=5)
-            data = r.json()
-            if "Answer" in data:
-                for answer in data["Answer"]:
-                    if answer["type"] == 1:
-                        ip = answer["data"]
-                        DNS_CACHE[domain] = ip
-                        return ip
-        except Exception as e:
-            print(f"DNS Resolution Error ({domain}): {e}")
-        return None
-
-    def dns_post(url, **kwargs):
-        """DNS engeli durumunda IP üzerinden POST isteği atar."""
-        parsed = urllib.parse.urlparse(url)
-        domain = parsed.netloc
-        ip = dns_resolve(domain)
-        
-        headers = kwargs.get("headers", {})
-        if ip:
-            url = url.replace(domain, ip).replace("https://", "http://")
-            headers["Host"] = domain
-            kwargs["headers"] = headers
-            kwargs["verify"] = False # IP üzerinden HTTPS/SSL hatası almamak için
-        
-        return requests.post(url, **kwargs)
-
     def getAuthSignature():
         # Varsayılan Token (Flutter uygulamasındaki ile aynı)
         TOKEN = "ldCvE092e7gER0rVIajfsXIvRhwlrAzP6_1oEJ4q6HH89QHt24v6NNL_jQJO219hiLOXF2hqEfsUuEWitEIGN4EaHHEHb7Cd7gojc5SQYRFzU3XWo_kMeryAUbcwWnQrnf0-"
@@ -523,7 +547,7 @@ def vavoo_channels():
         return None
     
     def vavoo_groups():
-        return ["Turkey", "Germany", "France", "USA", "UK"] # Örnek popüler gruplar
+        return ["Turkey", "Germany", "France", "USA", "UK"] 
     
     def clean_channel_name(name):
         cleaned_name = re.sub(r'\s*\.(a|b|c|s|d|e|f|g|h|i|j|k|l|m|n|o|p|q|r|t|u|v|w|x|y|z)\s*$', '', name, flags=re.IGNORECASE)
@@ -543,7 +567,6 @@ def vavoo_channels():
         }
         
         all_channels = []
-        # Not: Boş grup tüm kataloğu çeker
         groups = [""] 
         
         for group in groups:
@@ -562,8 +585,10 @@ def vavoo_channels():
                     "clientVersion": "3.0.2"
                 }
                 try:
-                    # Catalog isteğini de DNS bypass ile atıyoruz
                     resp = dns_post("https://vavoo.to/mediahubmx-catalog.json", json=data, headers=headers, timeout=15)
+                    if resp.status_code != 200:
+                        print(f"Catalog Request Failed ({resp.status_code}): {resp.text[:100]}")
+                        break
                     r = resp.json()
                     items = r.get("items", [])
                     all_channels.extend(items)
@@ -683,9 +708,9 @@ def sportsonline():
 
     print(f"1. Scarico la programmazione da: {PROG_URL}")
     try:
-        response = requests.get(PROG_URL, timeout=10)
+        response = dns_get(PROG_URL, timeout=10)
         response.raise_for_status()
-    except requests.exceptions.RequestException as e:
+    except Exception as e:
         print(f"[ERRORE FATALE] Impossibile scaricare il file di programmazione: {e}")
         return
 
