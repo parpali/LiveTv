@@ -406,57 +406,147 @@ def schedule_extractor():
             exit(1)
 
 def vavoo_channels():
-    # Codice del settimo script qui
-    # Aggiungi il codice del tuo script "world_channels_generator.py" in questa funzione.
-    print("Eseguendo vavoo_channels...")
+    """
+    Vavoo kanallarını imza (signature) ve token sistemini kullanarak çeker.
+    DNS engellerini aşmak için DoH (DNS Over HTTPS) ve yedek imza (veclist) sistemlerini barındırır.
+    """
+    print("Eseguendo vavoo_channels (Robust Version)...")
     
+    DNS_CACHE = {}
+
+    def dns_resolve(domain):
+        if domain in DNS_CACHE:
+            return DNS_CACHE[domain]
+        try:
+            # Cloudflare DoH kullanarak IP adresini çöz
+            url = f"https://cloudflare-dns.com/dns-query?name={domain}&type=A"
+            r = requests.get(url, headers={"accept": "application/dns-json"}, timeout=5)
+            data = r.json()
+            if "Answer" in data:
+                for answer in data["Answer"]:
+                    if answer["type"] == 1:
+                        ip = answer["data"]
+                        DNS_CACHE[domain] = ip
+                        return ip
+        except Exception as e:
+            print(f"DNS Resolution Error ({domain}): {e}")
+        return None
+
+    def dns_post(url, **kwargs):
+        """DNS engeli durumunda IP üzerinden POST isteği atar."""
+        parsed = urllib.parse.urlparse(url)
+        domain = parsed.netloc
+        ip = dns_resolve(domain)
+        
+        headers = kwargs.get("headers", {})
+        if ip:
+            url = url.replace(domain, ip).replace("https://", "http://")
+            headers["Host"] = domain
+            kwargs["headers"] = headers
+            kwargs["verify"] = False # IP üzerinden HTTPS/SSL hatası almamak için
+        
+        return requests.post(url, **kwargs)
+
     def getAuthSignature():
-        headers = {
-            "user-agent": "okhttp/4.11.0",
-            "accept": "application/json",
-            "content-type": "application/json; charset=utf-8",
-            "content-length": "1106",
-            "accept-encoding": "gzip"
-        }
-        data = {
-            "token": "tosFwQCJMS8qrW_AjLoHPQ41646J5dRNha6ZWHnijoYQQQoADQoXYSo7ki7O5-CsgN4CH0uRk6EEoJ0728ar9scCRQW3ZkbfrPfeCXW2VgopSW2FWDqPOoVYIuVPAOnXCZ5g",
-            "reason": "app-blur",
-            "locale": "de",
-            "theme": "dark",
-            "metadata": {
-                "device": {
-                    "type": "Handset",
-                    "os": "Android",
-                    "osVersion": "10",
-                    "model": "Pixel 4",
-                    "brand": "Google"
+        # Varsayılan Token (Flutter uygulamasındaki ile aynı)
+        TOKEN = "ldCvE092e7gER0rVIajfsXIvRhwlrAzP6_1oEJ4q6HH89QHt24v6NNL_jQJO219hiLOXF2hqEfsUuEWitEIGN4EaHHEHb7Cd7gojc5SQYRFzU3XWo_kMeryAUbcwWnQrnf0-"
+        
+        bases = [
+            "https://www.lokke.app/api",
+            "https://www.vavoo.tv/api",
+            "https://vavoo.to"
+        ]
+        
+        payloads = [
+            # Payload 1: Lokke Main Style
+            {
+                "token": TOKEN,
+                "reason": "app-blur",
+                "locale": "de",
+                "theme": "dark",
+                "metadata": {
+                    "device": {"type": "Handset", "brand": "google", "model": "Nexus", "name": "21081111RG", "uniqueId": "d10e5d99ab665233"},
+                    "os": {"name": "android", "version": "7.1.2", "abis": ["arm64-v8a"], "host": "android"},
+                    "app": {"platform": "android", "version": "1.1.0", "buildId": "97215000", "engine": "hbc85", "signatures": ["6e8a975e3cbf07d5de823a760d4c2547f86c1403105020adee5de67ac510999e"], "installer": "com.android.vending"}
+                }
+            },
+            # Payload 2: Vavoo App Style
+            {
+                "token": TOKEN,
+                "reason": "app-blur",
+                "locale": "de",
+                "theme": "dark",
+                "metadata": {
+                    "device": {"type": "Handset", "brand": "google", "model": "Nexus", "name": "21081111RG", "uniqueId": "d10e5d99ab665233"},
+                    "os": {"name": "android", "version": "7.1.2", "abis": ["arm64-v8a"], "host": "android"},
+                    "app": {"platform": "android", "version": "3.1.20", "buildId": "289515000", "engine": "hbc85"}
                 }
             }
-        }
-        resp = requests.post("https://vavoo.to/mediahubmx-signature.json", json=data, headers=headers, timeout=10)
-        return resp.json().get("signature")
+        ]
+
+        # 1. Standart Ping ile İmza Almayı Dene
+        for base in bases:
+            for payload in payloads:
+                try:
+                    target_url = f"{base}/app/ping" if "api" in base else f"{base}/mediahubmx-signature.json"
+                    headers = {
+                        "user-agent": "okhttp/4.11.0",
+                        "accept": "application/json",
+                        "content-type": "application/json; charset=utf-8"
+                    }
+                    resp = dns_post(target_url, json=payload, headers=headers, timeout=10)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        sig = data.get("addonSig") or data.get("signature")
+                        if sig:
+                            print(f"✓ Signature fetched via {base}")
+                            return sig
+                except Exception as e:
+                    continue
+
+        # 2. Veclist Fallback (Eğer tüm pingler başarısız olursa)
+        print("! Standart imza yöntemi başarısız. Veclist deneniyor...")
+        try:
+            veclist_path = os.path.join(os.path.dirname(__file__), "veclist.json")
+            if os.path.exists(veclist_path):
+                with open(veclist_path, "r", encoding="utf-8") as f:
+                    vdata = json.load(f)
+                    sigs = vdata.get("value", [])
+                    if sigs:
+                        import random
+                        fallback_sig = random.choice(sigs)
+                        print("✓ Signature used from veclist.json")
+                        return fallback_sig
+        except Exception as e:
+            print(f"Veclist Error: {e}")
+
+        return None
     
     def vavoo_groups():
-        # Puoi aggiungere altri gruppi per più canali
-        return [""]
+        return ["Turkey", "Germany", "France", "USA", "UK"] # Örnek popüler gruplar
     
     def clean_channel_name(name):
-        """Rimuove i suffissi .a, .b, .c dal nome del canale"""
-        # Rimuove .a, .b, .c alla fine del nome (con o senza spazi prima)
         cleaned_name = re.sub(r'\s*\.(a|b|c|s|d|e|f|g|h|i|j|k|l|m|n|o|p|q|r|t|u|v|w|x|y|z)\s*$', '', name, flags=re.IGNORECASE)
         return cleaned_name.strip()
     
     def get_channels():
         signature = getAuthSignature()
+        if not signature:
+            print("❌ ERROR: Could not obtain signature.")
+            return []
+            
         headers = {
             "user-agent": "okhttp/4.11.0",
             "accept": "application/json",
             "content-type": "application/json; charset=utf-8",
-            "accept-encoding": "gzip",
             "mediahubmx-signature": signature
         }
+        
         all_channels = []
-        for group in vavoo_groups():
+        # Not: Boş grup tüm kataloğu çeker
+        groups = [""] 
+        
+        for group in groups:
             cursor = 0
             while True:
                 data = {
@@ -471,17 +561,21 @@ def vavoo_channels():
                     "cursor": cursor,
                     "clientVersion": "3.0.2"
                 }
-                resp = requests.post("https://vavoo.to/mediahubmx-catalog.json", json=data, headers=headers, timeout=10)
-                r = resp.json()
-                items = r.get("items", [])
-                all_channels.extend(items)
-                cursor = r.get("nextCursor")
-                if not cursor:
+                try:
+                    # Catalog isteğini de DNS bypass ile atıyoruz
+                    resp = dns_post("https://vavoo.to/mediahubmx-catalog.json", json=data, headers=headers, timeout=15)
+                    r = resp.json()
+                    items = r.get("items", [])
+                    all_channels.extend(items)
+                    cursor = r.get("nextCursor")
+                    if not cursor:
+                        break
+                except Exception as e:
+                    print(f"Catalog Request Error: {e}")
                     break
         return all_channels
     
     def save_as_m3u(channels, filename="vavoo.m3u"):
-        # 1. Raccogli tutti i canali in una lista flat
         all_channels_flat = []
         for ch in channels:
             original_name = ch.get("name", "SenzaNome")
@@ -491,12 +585,10 @@ def vavoo_channels():
             if url:
                 all_channels_flat.append({'name': name, 'url': url, 'category': category})
 
-        # 2. Conta le occorrenze di ogni nome
         name_counts = {}
         for ch_data in all_channels_flat:
             name_counts[ch_data['name']] = name_counts.get(ch_data['name'], 0) + 1
 
-        # 3. Rinomina i duplicati
         final_channels_data = []
         name_counter = {}
         for ch_data in all_channels_flat:
@@ -504,7 +596,7 @@ def vavoo_channels():
             if name_counts[name] > 1:
                 if name not in name_counter:
                     name_counter[name] = 1
-                    new_name = name  # Mantieni il nome originale per la prima occorrenza
+                    new_name = name 
                 else:
                     name_counter[name] += 1
                     new_name = f"{name} ({name_counter[name]})"
@@ -512,7 +604,6 @@ def vavoo_channels():
                 new_name = name
             final_channels_data.append({'name': new_name, 'url': ch_data['url'], 'category': ch_data['category']})
 
-        # 4. Raggruppa i canali per categoria per la scrittura del file
         channels_by_category = {}
         for ch_data in final_channels_data:
             category = ch_data['category']
@@ -520,24 +611,25 @@ def vavoo_channels():
                 channels_by_category[category] = []
             channels_by_category[category].append((ch_data['name'], ch_data['url']))
 
-        # 5. Scrivi il file M3U
         with open(filename, "w", encoding="utf-8") as f:
             f.write("#EXTM3U\n")
             for category in sorted(channels_by_category.keys()):
                 channel_list = sorted(channels_by_category[category], key=lambda x: x[0].lower())
                 f.write(f"\n# {category.upper()}\n")
                 for name, url in channel_list:
+                    # İsteğe bağlı: Stream URL'lerini de proxy'den geçirmek isterseniz buraya 'proxyUrl' mantığı eklenebilir.
+                    # Ancak şimdilik orijinal URL'leri bırakıyoruz.
                     f.write(f'#EXTINF:-1 group-title="{category} VAVOO",{name}\n{url}\n')
 
         print(f"Playlist M3U salvata in: {filename}")
-        print(f"Canali organizzati in {len(channels_by_category)} categorie:")
-        for category, channel_list in channels_by_category.items():
-            print(f"  - {category}: {len(channel_list)} canali")
-    
-    if __name__ == "__main__":
-        channels = get_channels()
-        print(f"Trovati {len(channels)} canali. Creo la playlist M3U con i link proxy...")
-        save_as_m3u(channels) 
+
+    # Script ana çalıştırma mantığı
+    channels = get_channels()
+    if channels:
+        print(f"Trovati {len(channels)} canali. Creo la playlist M3U...")
+        save_as_m3u(channels)
+    else:
+        print("❌ Final channel list is empty.") 
         
 def sportsonline():
     import requests
